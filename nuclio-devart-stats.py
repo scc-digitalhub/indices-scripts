@@ -28,9 +28,10 @@ BASE_PATH = 'devart/dailydev/'
 OAUTH_AUTHORIZE_URL = "https://www.deviantart.com/oauth2/authorize"
 OAUTH_TOKEN_URL = "https://www.deviantart.com/oauth2/token"
 
-DEVART_DAILY_URL = "https://www.deviantart.com/api/v1/oauth2/browse/dailydeviations"
 DEVART_METADATA_URL = f"https://www.deviantart.com/api/v1/oauth2/deviation/metadata/"
 
+TODAY = datetime.today()
+DAILY_PATH = TODAY.strftime("year=%Y/month=%m/day=%d/")
 
 SESSION = False
 
@@ -75,6 +76,18 @@ def chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
+#Function to unpack the stats in the metadata response
+def unpack_stats(js):
+    d = {}
+    d["deviationid"] = [js["deviationid"]]
+    d["data"] = [pd.to_datetime(datetime.today().strftime("%Y-%m-%d %H:%M:%S"))]
+    d["views"] = [js["stats"]["views"]]
+    d["views_today"] = [js["stats"]["views_today"]]
+    d["favourites"] = [js["stats"]["favourites"]]
+    d["comments"] = [js["stats"]["comments"]]
+    d["downloads"] = [js["stats"]["downloads"]]
+    d["downloads_today"] = [js["stats"]["downloads_today"]]
+    return d
 
 def api_call_get(url, params):
     global SESSION
@@ -99,6 +112,81 @@ def api_call_get(url, params):
 def handler(context, event):
     try:
         context.logger.info('download datasets from daily devart')
+
+        start_date = datetime.today().strftime("%Y-%m-%d")
+        end_date = False
+        msg = {}
+
+        # params - expect json
+        if(event.content_type == 'application/json'):
+            msg = event.body
+        else:
+            jsstring = event.body.decode('utf-8').strip()
+            if jsstring:
+                msg = json.loads(jsstring)
+
+        context.logger.info(msg)
+
+        # fetch params
+        if 'start_date' in msg:
+            start_date = datetime.strptime(msg['start_date'], '%Y-%m-%d')
+
+        if 'end_date' in msg:
+            end_date = datetime.strptime(msg['end_date'], '%Y-%m-%d')
+
+        # init s3 client
+        s3 = boto3.client('s3',
+                          endpoint_url=S3_ENDPOINT,
+                          aws_access_key_id=S3_ACCESS_KEY,
+                          aws_secret_access_key=S3_SECRET_KEY,
+                          config=Config(signature_version='s3v4'),
+                          region_name='us-east-1')
+
+        if not end_date:
+            end_date = start_date
+        daterange = pd.date_range(start=start_date, end=end_date, freq="d")
+        datelist = daterange.to_pydatetime().tolist()
+
+        for cur_date in datelist:
+            day = cur_date.strftime("%Y-%m-%d")
+            date_path = cur_date.strftime("year=%Y/month=%m/")
+            ddf_filename = f'stats-daily-dev-of-{day}'
+
+            id_list = pd.read_csv(f"{BASE_PATH}csv/{date_path}daily-dev-{day}-ids.csv").values.tolist()
+            limit = 10
+            stat_list = []
+            for id_dev in chunks(id_list, limit):
+                params = {
+                        "deviationids[]":id_dev,
+                        "ext_stats":"true",
+                        "mature_content":"true"
+                        }
+                mdata_response = api_call_get(DEVART_METADATA_URL,params)
+                for dev in mdata_response['metadata']:
+                    d = unpack_stats(dev)
+                    stat_list.append(pd.DataFrame.from_dict(d))
+
+
+            # daily dev stats dataframe
+            ddf = pd.concat(stat_list)
+
+            # store parquet to S3
+            parquetio = io.BytesIO()
+            ddf.to_parquet(parquetio, engine='pyarrow')
+            # seek to start otherwise upload will be 0
+            parquetio.seek(0)
+
+            context.logger.info('upload to s3 as '+ddf_filename+'.parquet')
+            ddf_key = BASE_PATH + 'stats/' + DAILY_PATH + ddf_filename + '.parquet'
+            s3.upload_fileobj(parquetio, S3_BUCKET, ddf_key)
+
+            # cleanup
+            del parquetio
+            del ddf
+
+            # rate limit
+            time.sleep(2)
+
 
         context.logger.error('Done')
         return context.Response(body='Done',
