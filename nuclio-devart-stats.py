@@ -35,32 +35,7 @@ DAILY_PATH = TODAY.strftime("year=%Y/month=%m/day=%d/")
 
 SESSION = False
 
-
-class BytesIOWrapper(io.BufferedReader):
-    """Wrap a buffered bytes stream over TextIOBase string stream."""
-
-    def __init__(self, text_io_buffer, encoding=None, errors=None, **kwargs):
-        super(BytesIOWrapper, self).__init__(text_io_buffer, **kwargs)
-        self.encoding = encoding or text_io_buffer.encoding or 'utf-8'
-        self.errors = errors or text_io_buffer.errors or 'strict'
-
-    def _encoding_call(self, method_name, *args, **kwargs):
-        raw_method = getattr(self.raw, method_name)
-        val = raw_method(*args, **kwargs)
-        return val.encode(self.encoding, errors=self.errors)
-
-    def read(self, size=-1):
-        return self._encoding_call('read', size)
-
-    def read1(self, size=-1):
-        return self._encoding_call('read1', size)
-
-    def peek(self, size=-1):
-        return self._encoding_call('peek', size)
-
 # client credentials
-
-
 def client_auth():
 
     client = BackendApplicationClient(client_id=CLIENT_ID)
@@ -148,11 +123,12 @@ def handler(context, event):
         datelist = daterange.to_pydatetime().tolist()
 
         for cur_date in datelist:
+
             day = cur_date.strftime("%Y-%m-%d")
             date_path = cur_date.strftime("year=%Y/month=%m/")
             ddf_filename = f'stats-daily-dev-of-{day}'
 
-            id_list = pd.read_csv(f"{BASE_PATH}csv/{date_path}daily-dev-{day}-ids.csv").values.tolist()
+            id_list = pd.read_csv(f"{BASE_PATH}csv/{date_path}daily-dev-{day}-ids.csv")['ids'].values.tolist()
             limit = 10
             stat_list = []
             for id_dev in chunks(id_list, limit):
