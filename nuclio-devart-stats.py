@@ -27,8 +27,7 @@ OAUTH_TOKEN_URL = "https://www.deviantart.com/oauth2/token"
 
 DEVART_METADATA_URL = f"https://www.deviantart.com/api/v1/oauth2/deviation/metadata/"
 
-TODAY = datetime.today()
-DAILY_PATH = TODAY.strftime("year=%Y/month=%m/day=%d/")
+
 
 SESSION = False
 
@@ -86,6 +85,9 @@ def handler(context, event):
     try:
         context.logger.info('download datasets from daily devart')
 
+        TODAY = datetime.today()
+        DAILY_PATH = TODAY.strftime("year=%Y/month=%m/day=%d/") 
+
         start_date = datetime.today().strftime("%Y-%m-%d")
         end_date = False
         msg = {}
@@ -120,6 +122,8 @@ def handler(context, event):
         daterange = pd.date_range(start=start_date, end=end_date, freq="d")
         datelist = daterange.to_pydatetime().tolist()
 
+        today_df = pd.DataFrame()
+
         for cur_date in datelist:
 
             day = cur_date.strftime("%Y-%m-%d")
@@ -130,6 +134,7 @@ def handler(context, event):
             key = f"{BASE_PATH}csv/{date_path}daily-dev-{day}-ids.csv"
             obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
             dataio = io.BytesIO(obj['Body'].read())
+            #se non funzion bytes io leggi string io
             df = pd.DataFrame()
             context.logger.info('read csv into pandas dataframe')
             df = pd.read_csv(dataio)                        
@@ -148,29 +153,32 @@ def handler(context, event):
                     d = unpack_stats(dev)
                     stat_list.append(pd.DataFrame.from_dict(d))
 
-
             # daily dev stats dataframe 
             ddf = pd.concat(stat_list)
-
-            # store parquet to S3
-            parquetio = io.BytesIO()
-            ddf.to_parquet(parquetio, engine='pyarrow')
-            # seek to start otherwise upload will be 0
-            parquetio.seek(0)
-
-            context.logger.info('upload to s3 as '+ddf_filename+'.parquet')
-            ddf_key = BASE_PATH + 'stats/' + DAILY_PATH + ddf_filename + '.parquet'
-            s3.upload_fileobj(parquetio, S3_BUCKET, ddf_key)
-
-            # cleanup
-            del parquetio
-            del ddf
-            del dataio
-            del df
-
+            today_df.append(ddf)
+            
             # rate limit
             time.sleep(2)
 
+        today_df.reset_index(inplace=True, drop=True)
+        
+        # store parquet to S3
+        parquetio = io.BytesIO()
+        ddf.to_parquet(parquetio, engine='pyarrow')
+        # seek to start otherwise upload will be 0
+        parquetio.seek(0)
+
+        context.logger.info('upload to s3 as '+ddf_filename+'.parquet')
+        ddf_key = BASE_PATH + 'stats/' + DAILY_PATH + ddf_filename + '.parquet'
+        s3.upload_fileobj(parquetio, S3_BUCKET, ddf_key)
+
+        # cleanup
+        del parquetio
+        del ddf
+        del dataio
+        del df
+
+    
 
         context.logger.error('Done')
         return context.Response(body='Done',
