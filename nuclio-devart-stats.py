@@ -5,11 +5,8 @@ import io
 import json
 import os
 import requests
-import base64
-import gzip
 import time
-import re
-import pytz
+
 
 from botocore.client import Config
 from datetime import datetime
@@ -46,7 +43,7 @@ def client_auth():
 
     return oauth
 
-
+ 
 def chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
@@ -65,6 +62,7 @@ def unpack_stats(js):
     return d
 
 def api_call_get(url, params):
+    
     global SESSION
     if not SESSION:
         SESSION = client_auth()
@@ -127,8 +125,16 @@ def handler(context, event):
             day = cur_date.strftime("%Y-%m-%d")
             date_path = cur_date.strftime("year=%Y/month=%m/")
             ddf_filename = f'stats-daily-dev-of-{day}'
+ 
+            #reading csv from minio
+            key = f"{BASE_PATH}csv/{date_path}daily-dev-{day}-ids.csv"
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+            dataio = io.BytesIO(obj['Body'].read())
+            df = pd.DataFrame()
+            context.logger.info('read csv into pandas dataframe')
+            df = pd.read_csv(dataio)                        
+            id_list = df['ids'].values.tolist()
 
-            id_list = pd.read_csv(f"{BASE_PATH}csv/{date_path}daily-dev-{day}-ids.csv")['ids'].values.tolist()
             limit = 10
             stat_list = []
             for id_dev in chunks(id_list, limit):
@@ -143,7 +149,7 @@ def handler(context, event):
                     stat_list.append(pd.DataFrame.from_dict(d))
 
 
-            # daily dev stats dataframe
+            # daily dev stats dataframe 
             ddf = pd.concat(stat_list)
 
             # store parquet to S3
@@ -159,6 +165,8 @@ def handler(context, event):
             # cleanup
             del parquetio
             del ddf
+            del dataio
+            del df
 
             # rate limit
             time.sleep(2)
