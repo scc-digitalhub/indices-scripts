@@ -12,7 +12,7 @@ from requests_oauthlib import OAuth2Session
 
 CLIENT_ID = ""
 CLIENT_SECRET = ""
- 
+
 BASE_PATH = 'devart/popular/'
 PATH_CSV_CATEGORY = "devart/popular/categorylist/"
 
@@ -21,8 +21,6 @@ OAUTH_TOKEN_URL = "https://www.deviantart.com/oauth2/token"
 
 DEVART_POULAR_URL = "https://www.deviantart.com/api/v1/oauth2/browse/popular"
 DEVART_METADATA_URL = f"https://www.deviantart.com/api/v1/oauth2/deviation/metadata/"
-
-TODAY = datetime.today()
 
 SESSION = False
 
@@ -44,7 +42,7 @@ def chunks(lst, n):
 
 # Function to unpack and merge the popular deviation
 # response and the metadata response
-def unpack_data(js):
+def unpack_data(js,today):
 
     dd_js = js[0]
     md_js = js[1]
@@ -53,6 +51,7 @@ def unpack_data(js):
     d["printid"] = [dd_js["printid"]]
     d["published_time"] = [pd.to_datetime(
         dd_js["published_time"], unit="s", origin="unix")]
+    d["poular_24hr_time"] = [pd.to_datetime(today)]
     d["url"] = [dd_js["url"]]
     d["title"] = [dd_js["title"]]
     d["category"] = [dd_js["category"]]
@@ -70,7 +69,7 @@ def unpack_data(js):
 
 
 def api_call_get(url,params):
-    
+
     global SESSION
     if not SESSION:
         SESSION=client_auth()
@@ -89,19 +88,21 @@ def api_call_get(url,params):
 
 def download_data(timerange=None):
 
+        today = datetime.today()
+        date_path = today.strftime("year=%Y/month=%m/day=%d/")\
+
         if not timerange:
             timerange = '24hr'
-        
+
         #just an example of category list instead of read csv path
         category_list = ["/anthro","/anthro/digital"]
         pdev_list = []
-        date_path = TODAY.strftime("year=%Y/month=%m/day=%d/")
-        
+
         #set base filename and storing directories
         if timerange == '24hr':
-            
-            filename = f'popular-{timerange}-{TODAY.strftime("%Y-%m-%d")}'
-            csv_path = f"{BASE_PATH}{timerange}/csv/{date_path}"                
+
+            filename = f'popular-{timerange}-{today.strftime("%Y-%m-%d")}'
+            csv_path = f"{BASE_PATH}{timerange}/csv/{date_path}"
             json_path = f"{BASE_PATH}{timerange}/json/{date_path}"
             parquet_path = f"{BASE_PATH}{timerange}/parquet/{date_path}"
 
@@ -109,11 +110,10 @@ def download_data(timerange=None):
             #TODO
             pass
 
-
         for cat in category_list:
-            
+
             cat_name = cat.lstrip("/").replace("/","_")
-            
+
             limit = 24
             offset = 0
             has_more = True
@@ -121,7 +121,7 @@ def download_data(timerange=None):
 
             #cycle over offset until there's new results
             while has_more==True and len_array>0:
-                
+
                 params_pop = {
                         "category_path":cat,
                         "timerange":timerange,
@@ -130,18 +130,18 @@ def download_data(timerange=None):
                         "mature_content":"true"}
 
                 data = api_call_get(DEVART_POULAR_URL,params_pop)
-                
+
                 len_array = len(data["results"])
                 has_more = data["has_more"]
-                
+
                 #if the response doesn't contain data the json is not saved
                 if len_array>0:
-                    
+
                     pdev_list.extend([i for i in data["results"]])
 
                     #storing json file
                     json_key = f"{json_path}{filename}-{cat_name}-{offset}.json"
-                    
+
                     if not os.path.exists(json_path):
                         os.makedirs(json_path)
 
@@ -150,7 +150,7 @@ def download_data(timerange=None):
 
                     offset += 24
 
-                time.sleep(2)
+                time.sleep(1)
 
 
         #remove duplicated deviations
@@ -169,7 +169,7 @@ def download_data(timerange=None):
 
         idf.to_csv(csv_key,index=False)
 
-        
+
         # download metadata for every deviations
         limit = 50
         mdev_list = []
@@ -191,17 +191,17 @@ def download_data(timerange=None):
 
         list_pandas = []
         for couple in coupled_json:
-            d = unpack_data(couple)
+            d = unpack_data(couple, today)
             list_pandas.append(pd.DataFrame.from_dict(d))
 
         # popular dev + metadata
         ddf = pd.concat(list_pandas)
-    
+
         parquet_key = f"{parquet_path}{filename}.parquet"
-        
+
         if not os.path.exists(parquet_path):
             os.makedirs(parquet_path)
-        
+
         ddf.to_parquet(parquet_key, index=False, engine="pyarrow")
 
         # rate limit

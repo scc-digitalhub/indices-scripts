@@ -27,8 +27,6 @@ OAUTH_TOKEN_URL = "https://www.deviantart.com/oauth2/token"
 
 DEVART_METADATA_URL = f"https://www.deviantart.com/api/v1/oauth2/deviation/metadata/"
 
-
-
 SESSION = False
 
 # client credentials
@@ -82,14 +80,18 @@ def api_call_get(url, params):
 
 
 def handler(context, event):
+    
     try:
-        context.logger.info('download datasets from daily devart')
 
-        TODAY = datetime.today()
-        DAILY_PATH = TODAY.strftime("year=%Y/month=%m/day=%d/") 
+        today = datetime.today()
+        today_str = today.strftime("%Y-%m-%d")
+        daily_path = today.strftime("year=%Y/month=%m/day=%d/")
 
+        context.logger.info(f'download metadata stats of {today_str} for daily devart')
+ 
         start_date = datetime.today().strftime("%Y-%m-%d")
         end_date = False
+        
         msg = {}
 
         # params - expect json
@@ -109,6 +111,9 @@ def handler(context, event):
         if 'end_date' in msg:
             end_date = datetime.strptime(msg['end_date'], '%Y-%m-%d')
 
+        if not end_date:
+            end_date = start_date
+
         # init s3 client
         s3 = boto3.client('s3',
                           endpoint_url=S3_ENDPOINT,
@@ -116,9 +121,8 @@ def handler(context, event):
                           aws_secret_access_key=S3_SECRET_KEY,
                           config=Config(signature_version='s3v4'),
                           region_name='us-east-1')
-
-        if not end_date:
-            end_date = start_date
+        
+        context.logger.info(f"Retrieve metadata for daily deviation from {start_date} to {end_date}")
         daterange = pd.date_range(start=start_date, end=end_date, freq="d")
         datelist = daterange.to_pydatetime().tolist()
 
@@ -134,9 +138,8 @@ def handler(context, event):
             key = f"{BASE_PATH}csv/{date_path}daily-dev-{day}-ids.csv"
             obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
             dataio = io.BytesIO(obj['Body'].read())
-            #se non funzion bytes io leggi string io
             df = pd.DataFrame()
-            context.logger.info('read csv into pandas dataframe')
+            context.logger.info(f'read {key} into pandas dataframe')
             df = pd.read_csv(dataio)                        
             id_list = df['ids'].values.tolist()
 
@@ -169,7 +172,7 @@ def handler(context, event):
         parquetio.seek(0)
 
         context.logger.info('upload to s3 as '+ddf_filename+'.parquet')
-        ddf_key = BASE_PATH + 'stats/' + DAILY_PATH + ddf_filename + '.parquet'
+        ddf_key = BASE_PATH + 'stats/' + daily_path + ddf_filename + '.parquet'
         s3.upload_fileobj(parquetio, S3_BUCKET, ddf_key)
 
         # cleanup
@@ -178,7 +181,6 @@ def handler(context, event):
         del dataio
         del df
 
-    
 
         context.logger.error('Done')
         return context.Response(body='Done',
