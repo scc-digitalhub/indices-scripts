@@ -21,8 +21,8 @@ AZURE_CONNECTION_STRING = os.environ.get('AZURE_CONNECTION_STRING')
 AZURE_CONTAINER = os.environ.get('AZURE_CONTAINER')
 
 BASE_URL = 'http://ftp.acc.umu.se/mirror/wikimedia.org/other/pageviews'
-DATE_START = datetime(2015, 5, 1, 0, 0, 0)
-DATE_END = datetime(2015, 12, 1, 0, 0, 0)
+DATE_START = datetime(2016, 1, 1, 0, 0, 0)
+DATE_END = datetime(2019, 12, 1, 0, 0, 0)
 
 CHUNK_SIZE = 64 * 1024 * 1024
 
@@ -75,15 +75,19 @@ def handler(context, event):
             # build urls and get links
             idx_uri = "{}/{}/{}".format(BASE_URL, year, month)
             links = [l for l in getLinks(idx_uri) if prm.match(l)]
+            #remove duplicates
+            links =  list(set(links))
+            links.sort()
 
             for link in links:
-
+                context.logger.debug("parse link {}".format(link))
+                
                 furi = "{}/{}/{}/{}".format(BASE_URL, year, month, link)
                 dest = "dump/pageviews/{}/{}/{}".format(year, month, link)
 
                 try:
 
-                    ##resolve redirect
+                    # resolve redirect
                     response = requests.get(furi, stream=True)
                     uri = response.url
 
@@ -96,42 +100,62 @@ def handler(context, event):
                         blob_client = container_client.get_blob_client(
                             dest)
 
-                        # count chunks
-                        parts = count_chunks(fileSize, CHUNK_SIZE)
-                        context.logger.debug("upload to {} in {} chunks of size {}".format(
-                            dest, parts, CHUNK_SIZE))
+                        # check if raw files already exist
+                        # https://github.com/Azure/azure-sdk-for-python/issues/9507
+                        exists = False
+                        try:
+                            # One of the very few methods which do not mutate state
+                            properties = blob_client.get_blob_properties()
+                            if(int(properties['size']) == fileSize):
+                                # skip only if complete
+                                exists = True
+                        except ResourceNotFoundError:
+                            # Not found
+                            exists = False
+                            pass
 
-                        blist = []
-                        for idx in range(0, parts):
-                            bid = format(idx, '05d')
-                            olength = CHUNK_SIZE
-                            ostart = CHUNK_SIZE*idx
-                            if(ostart >= fileSize):
-                                break
-                            oend = ostart+CHUNK_SIZE
-                            if(oend > fileSize):
-                                oend = fileSize
-                                olength = oend - ostart
-                            if(olength <= 0):
-                                break
-                            #print("chunk {} start {} length {}".format(bid, ostart, olength))
+                        if exists:
+                            # skip
+                            context.logger.debug("skip  {}".format(dest))
 
-                            blob_client.stage_block_from_url(
-                                bid, uri, source_offset=ostart, source_length=olength)
-                            blist.append(BlobBlock(block_id=bid))
+                        else:
+                            # import
+                            # count chunks
+                            parts = count_chunks(fileSize, CHUNK_SIZE)
+                            context.logger.debug("upload to {} in {} chunks of size {}".format(
+                                dest, parts, CHUNK_SIZE))
 
-                        # sync
-                        blob_client.commit_block_list(blist)
+                            blist = []
+                            for idx in range(0, parts):
+                                bid = format(idx, '05d')
+                                olength = CHUNK_SIZE
+                                ostart = CHUNK_SIZE*idx
+                                if(ostart >= fileSize):
+                                    break
+                                oend = ostart+CHUNK_SIZE
+                                if(oend > fileSize):
+                                    oend = fileSize
+                                    olength = oend - ostart
+                                if(olength <= 0):
+                                    break
+                                #print("chunk {} start {} length {}".format(bid, ostart, olength))
 
-                        # read meta
-                        properties = blob_client.get_blob_properties()
-                        context.logger.debug("wrote to {} size {}".format(
-                            properties['name'], properties['size']))
+                                blob_client.stage_block_from_url(
+                                    bid, uri, source_offset=ostart, source_length=olength)
+                                blist.append(BlobBlock(block_id=bid))
 
-                        # cleanup
-                        del blob_client
-                        del properties
-                        del blist
+                            # sync
+                            blob_client.commit_block_list(blist)
+
+                            # read meta
+                            properties = blob_client.get_blob_properties()
+                            context.logger.debug("wrote to {} size {}".format(
+                                properties['name'], properties['size']))
+
+                            # cleanup
+                            del blob_client
+                            del properties
+                            del blist
 
                     else:
                         context.logger.error(
@@ -143,7 +167,9 @@ def handler(context, event):
                 except Exception as e:
                     context.logger.error(
                         "error with {} : {}".format(link, str(e)))
-            # end lang loop
+            
+            # end link loop
+            
             cur_date = cur_date + interval
         # end while
         context.logger.info("done.")
