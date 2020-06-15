@@ -5,6 +5,7 @@ import os
 import pandas as pd
 import requests
 import time
+import gzip
 
 
 from datetime import datetime
@@ -41,28 +42,6 @@ SESSION = False
 # max working is 64MB
 AZURE_CHUNK_SIZE = 64 * 1024 * 1024
 
-
-class BytesIOWrapper(io.BufferedReader):
-    """Wrap a buffered bytes stream over TextIOBase string stream."""
-
-    def __init__(self, text_io_buffer, encoding=None, errors=None, **kwargs):
-        super(BytesIOWrapper, self).__init__(text_io_buffer, **kwargs)
-        self.encoding = encoding or text_io_buffer.encoding or 'utf-8'
-        self.errors = errors or text_io_buffer.errors or 'strict'
-
-    def _encoding_call(self, method_name, *args, **kwargs):
-        raw_method = getattr(self.raw, method_name)
-        val = raw_method(*args, **kwargs)
-        return val.encode(self.encoding, errors=self.errors)
-
-    def read(self, size=-1):
-        return self._encoding_call('read', size)
-
-    def read1(self, size=-1):
-        return self._encoding_call('read1', size)
-
-    def peek(self, size=-1):
-        return self._encoding_call('peek', size)
 
 ##
 # DeviantArt client
@@ -275,26 +254,25 @@ def handler(context, event):
 
                     pcat_list.extend([i for i in pdev_data["results"]])
 
-                    # write as StringIO json
-                    jsonio = io.StringIO()
-                    json.dump(pdev_data, jsonio, ensure_ascii=False)
+                    # write as gzipped json
+                    jsonio = io.BytesIO()
+                    with gzip.GzipFile(fileobj=jsonio, mode="wb") as gzio:
+                        gzio.write(json.dumps(
+                            pdev_data, ensure_ascii=False).encode())
+
                     # seek to start otherwise upload will be 0
                     jsonio.seek(0)
 
-                    # wrap as byte with reader
-                    wrapjsonio = BytesIOWrapper(jsonio)
-
                     # upload
                     fok = format(offset, '05d')
-                    json_key = f"{json_path}{cat_name}/{filename}-{cat_name}-{fok}.json"
+                    json_key = f"{json_path}{cat_name}/{filename}-{cat_name}-{fok}.json.gz"
                     context.logger.debug(f'upload json to azure as {json_key}')
                     blob_client = container_client.get_blob_client(json_key)
-                    wsize = upload_azure_blob(blob_client, wrapjsonio)
+                    wsize = upload_azure_blob(blob_client, jsonio)
                     context.logger.debug(
                         f'wrote {wsize} to azure as {json_key}')
 
                     # cleanup
-                    del wrapjsonio
                     del jsonio
                     del blob_client
 
@@ -318,7 +296,7 @@ def handler(context, event):
             context.logger.debug(
                 f'download popular {cat_name} metadata for {len(idcat_list)} entries')
 
-            # limit is 50, rediced to 10 when using ext_stats
+            # limit is 50, reduced to 10 when using ext_stats
             limit = 10
             mdev_list = []
             for id_dev in chunks(idcat_list, limit):
@@ -387,19 +365,18 @@ def handler(context, event):
         id_list = [x for x in set(id_list)]
         idf = pd.DataFrame(id_list, columns=["ids"])
 
-        # write to azure as csv
-        csvio = io.StringIO()
-        idf.to_csv(csvio, header=True, index=False)
+        # write to azure as gzipped csv
+        csvio = io.BytesIO()
+        with gzip.GzipFile(fileobj=csvio, mode="wb") as gzio:
+            gzio.write(idf.to_csv(header=True, index=False).encode())          
+        
         # seek to start otherwise upload will be 0
-        csvio.seek(0)
+        csvio.seek(0)                      
 
-        # wrap as byte with reader
-        wrapcsvio = BytesIOWrapper(csvio)
-
-        csv_key = f"{IDS_PATH}{date_path}{filename}-ids.csv"
+        csv_key = f"{IDS_PATH}{date_path}{filename}-ids.csv.gz"
         context.logger.info(f'upload csv to azure as {csv_key}')
         blob_client = container_client.get_blob_client(csv_key)
-        wsize = upload_azure_blob(blob_client, wrapcsvio)
+        wsize = upload_azure_blob(blob_client, csvio)
         context.logger.debug(f'wrote {wsize} to azure as {csv_key}')
 
         # write stats from meta
@@ -408,17 +385,17 @@ def handler(context, event):
             d = unpack_stats(dev, today)
             stat_list.append(pd.DataFrame.from_dict(d))
 
-        # daily dev stats dataframe
-        ddf = pd.concat(stat_list)
-        ddf.reset_index(drop=True, inplace=True)
+        # stats dataframe
+        sdf = pd.concat(stat_list)
+        sdf.reset_index(drop=True, inplace=True)
 
         # fix fields precision
-        ddf['stats_time'] = ddf['stats_time'].astype(
+        sdf['stats_time'] = sdf['stats_time'].astype(
             "datetime64[ms]")
 
         # dump
         statsio = io.BytesIO()
-        ddf.to_parquet(statsio, engine='pyarrow')
+        sdf.to_parquet(statsio, engine='pyarrow')
         # seek to start otherwise upload will be 0
         statsio.seek(0)
 
@@ -430,10 +407,9 @@ def handler(context, event):
         context.logger.debug(f'wrote {wsize} to azure as {stats_key}')
 
         # cleanup
-        del wrapcsvio
         del csvio
         del statsio
-        del ddf
+        del sdf
         del idf
 
         context.logger.error('Done')
