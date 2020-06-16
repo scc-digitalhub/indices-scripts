@@ -34,8 +34,10 @@ DEVART_METADATA_URL = "https://www.deviantart.com/api/v1/oauth2/deviation/metada
 
 DEVART_VALID_TIMERANGE = ['24hr', '3days', '1week', '1month', 'alltime']
 
+DUMP_JSON = True
 PAGE_SIZE = 24
 MAX_OFFSET = 5000
+MAX_RETRIES = 3
 SLEEP_AMOUNT = 0.5
 SESSION = False
 
@@ -89,10 +91,10 @@ def chunks(lst, n):
         yield lst[i:i + n]
 
 
-def unpack_data(js, today):
+def unpack_data(dd_js, md_js, today):
+    if dd_js["deviationid"] != md_js["deviationid"]:
+        raise Exception("data mismatch") 
 
-    dd_js = js[0]
-    md_js = js[1]
     d = {}
     d["deviationid"] = [dd_js["deviationid"]]
     d["printid"] = [dd_js["printid"]]
@@ -222,19 +224,24 @@ def handler(context, event):
             context.logger.info(
                 f'download popular {cat_name} for range {timerange}')
 
-            pcat_list = []
+            pcat_list = {}
 
             # pagination
             limit = PAGE_SIZE
             offset = 0
             has_more = True
             len_array = 1
+            retries = 0
+            estimates = 0    
+            can_write = False        
 
             context.logger.debug(
                 f'download popular {cat_name} json responses')
 
             # cycle over offset until there's no new results up to max
-            while has_more == True and len_array > 0 and offset < MAX_OFFSET:
+            while has_more == True and len_array > 0 and offset < MAX_OFFSET and retries < MAX_RETRIES:
+
+                context.logger.debug(f'call API for popular {cat_name} offset {offset} retry {retries}')
 
                 call_params = {
                     "category_path": cat,
@@ -246,14 +253,39 @@ def handler(context, event):
                 # call for page - rate limited
                 pdev_data = api_call_get(DEVART_POPULAR_URL, call_params)
 
+                estimates = int(pdev_data['estimated_total'])
                 len_array = len(pdev_data["results"])
                 has_more = pdev_data["has_more"]
 
-                # if the response doesn't contain data the json is not saved
-                if len_array > 0:
+                if len_array == PAGE_SIZE:
+                    # complete page
+                    for i in pdev_data["results"]:
+                        pcat_list[i['deviationid']] = i
+                    offset += PAGE_SIZE
+                    can_write = True
+                    
+                elif len_array < PAGE_SIZE and offset < (estimates - PAGE_SIZE):
+                    # truncated page, not last, retry
+                    retries += 1
+                    can_write = False
 
-                    pcat_list.extend([i for i in pdev_data["results"]])
+                    if retries == MAX_RETRIES:
+                        # accept truncated and correct offset
+                        for i in pdev_data["results"]:
+                            pcat_list[i['deviationid']] = i
+                        offset += len_array
+                        retries = 0
+                        can_write = True
+                    
+                elif len_array < PAGE_SIZE and offset >= (estimates - PAGE_SIZE):
+                    # last page
+                    for i in pdev_data["results"]:
+                        pcat_list[i['deviationid']] = i
+                    offset += len_array   
+                    can_write = True 
 
+
+                if can_write and DUMP_JSON:
                     # write as gzipped json
                     jsonio = io.BytesIO()
                     with gzip.GzipFile(fileobj=jsonio, mode="wb") as gzio:
@@ -274,22 +306,20 @@ def handler(context, event):
 
                     # cleanup
                     del jsonio
-                    del blob_client
+                    del blob_client                    
 
-                    offset += PAGE_SIZE
+
+                del pdev_data
 
                 # rate limit
                 time.sleep(SLEEP_AMOUNT)
 
             # add request category to results
-            for pc in pcat_list:
+            for pc in pcat_list.values():
                 pc['popular_category'] = cat_name
 
-            # remove duplicated deviations - not needed in single cat
-            #pcat_list = set([str(x) for x in pcat_list])
-            #pcat_list = [ast.literal_eval(i) for i in pcat_list]
 
-            idcat_list = [dev["deviationid"] for dev in pcat_list]
+            idcat_list = [i for i in pcat_list.keys()]
             id_list.extend(idcat_list)
 
             # download metadata for every deviations
@@ -298,7 +328,7 @@ def handler(context, event):
 
             # limit is 50, reduced to 10 when using ext_stats
             limit = 10
-            mdev_list = []
+            mdev_list = {}
             for id_dev in chunks(idcat_list, limit):
                 mdev_params = {
                     "deviationids[]": id_dev,
@@ -308,31 +338,32 @@ def handler(context, event):
 
                 mdata_response = api_call_get(DEVART_METADATA_URL, mdev_params)
                 for dev in mdata_response["metadata"]:
-                    mdev_list.append(dev)
+                    mdev_list[dev['deviationid']] = dev
+                    meta_list[dev['deviationid']] = dev
 
                 # rate limit
                 time.sleep(SLEEP_AMOUNT)
 
             context.logger.debug(
-                f'process popular {cat_name} entries + metadata for {len(idcat_list)} entries')
-
-            # merge data and metadata and export to parquet
-            pcat_list = sorted(pcat_list, key=lambda x: x["deviationid"])
-            mdev_list = sorted(mdev_list, key=lambda x: x["deviationid"])
-            for m in mdev_list:
-                meta_list[m['deviationid']] = m
-
-            coupled_json = [[i, j] for i, j in zip(
-                pcat_list, mdev_list) if i["deviationid"] == j["deviationid"]]
+                f'downloaded popular {cat_name} metadata for {len(mdev_list)} entries')
+            context.logger.debug(
+                f'process popular {cat_name} entries + metadata for {len(pcat_list)} entries')
 
             list_pandas = []
-            for couple in coupled_json:
-                d = unpack_data(couple, today)
-                list_pandas.append(pd.DataFrame.from_dict(d))
+            for i in idcat_list:
+                if i in pcat_list and i in mdev_list:
+                    d = unpack_data(pcat_list[i], mdev_list[i], today)                
+                    list_pandas.append(pd.DataFrame.from_dict(d))
+
+            context.logger.debug(
+                f'unpacked popular {cat_name} entries + metadata for {len(list_pandas)} entries')
 
             # popular dev + metadata
             pdf = pd.concat(list_pandas)
             pdf.reset_index(drop=True, inplace=True)
+
+            context.logger.debug(
+                f'result popular {cat_name} entries + metadata for {len(pdf)} entries')
 
             # fix fields precision
             pdf['published_time'] = pdf['published_time'].astype(
@@ -356,9 +387,9 @@ def handler(context, event):
             del parquetio
             del pdf
             del blob_client
+            del idcat_list
             del pcat_list
             del mdev_list
-            del coupled_json
             # end category
 
         # fetch and store ids of popular deviation
