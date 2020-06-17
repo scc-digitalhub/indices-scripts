@@ -85,10 +85,10 @@ def chunks(lst, n):
 # response and the metadata response
 
 
-def unpack_data(js):
+def unpack_data(dd_js, md_js):
+    if dd_js["deviationid"] != md_js["deviationid"]:
+        raise Exception("data mismatch")
 
-    dd_js = js[0]
-    md_js = js[1]
     d = {}
     d["deviationid"] = [dd_js["deviationid"]]
     d["printid"] = [dd_js["printid"]]
@@ -214,10 +214,6 @@ def handler(context, event):
             context.logger.info(
                 f'download daily deviation for {day}')
 
-            # day = cur_date.strftime("%Y%m%d")
-            # date_path = cur_date.strftime("year=%Y/month=%m/")
-            # ddf_filename = 'daily-dev-{}'.format(day)
-
             # dailydev
             call_params = {
                 "date": day,
@@ -247,8 +243,13 @@ def handler(context, event):
             del jsonio
             del blob_client
 
+            # parse result
+            ddev_list = {}
+            for dev in ddev_data["results"]:
+                ddev_list[dev['deviationid']] = dev
+
             # fetch ids
-            id_list = [dev["deviationid"] for dev in ddev_data["results"]]
+            id_list = [i for i in ddev_list.keys()]
             idf = pd.DataFrame(id_list, columns=["ids"])
 
             # write to azure as gzipped csv
@@ -270,13 +271,12 @@ def handler(context, event):
             del blob_client
 
             # download metadata for every deviations
-            ddev_list = [dev for dev in ddev_data["results"]]
             context.logger.debug(
                 f'download daily {day} metadata for {len(id_list)} entries')
 
             # limit is 50, reduced to 10 when using ext_stats
             limit = 10
-            mdev_list = []
+            mdev_list = {}
             for id_dev in chunks(id_list, limit):
                 mdev_params = {
                     "deviationids[]": id_dev,
@@ -286,29 +286,31 @@ def handler(context, event):
 
                 mdata_response = api_call_get(DEVART_METADATA_URL, mdev_params)
                 for dev in mdata_response["metadata"]:
-                    mdev_list.append(dev)
+                    mdev_list[dev['deviationid']] = dev
 
                 # rate limit
                 time.sleep(SLEEP_AMOUNT)
 
             context.logger.debug(
+                f'downloaded daily {day} metadata for {len(mdev_list)} entries')
+            context.logger.debug(
                 f'process daily {day} entries + metadata for {len(id_list)} entries')
 
-            # merge data and metadata and export to parquet
-            ddev_list = sorted(ddev_list, key=lambda x: x["deviationid"])
-            mdev_list = sorted(mdev_list, key=lambda x: x["deviationid"])
-
-            coupled_json = [[i, j] for i, j in zip(
-                ddev_list, mdev_list) if i["deviationid"] == j["deviationid"]]
-
             list_pandas = []
-            for couple in coupled_json:
-                d = unpack_data(couple)
-                list_pandas.append(pd.DataFrame.from_dict(d))
+            for i in id_list:
+                if i in ddev_list and i in mdev_list:
+                    d = unpack_data(ddev_list[i], mdev_list[i])
+                    list_pandas.append(pd.DataFrame.from_dict(d))
+
+            context.logger.debug(
+                f'unpacked daily {day} entries + metadata for {len(list_pandas)} entries')
 
             # daily dev + metadata
             ddf = pd.concat(list_pandas)
             ddf.reset_index(drop=True, inplace=True)
+
+            context.logger.debug(
+                f'result daily {day} entries + metadata for {len(ddf)} entries')
 
             # fix fields precision
             ddf['published_time'] = ddf['published_time'].astype(
@@ -337,7 +339,7 @@ def handler(context, event):
 
             # write stats from meta
             stat_list = []
-            for dev in mdev_list:
+            for dev in mdev_list.values():
                 d = unpack_stats(dev, today)
                 stat_list.append(pd.DataFrame.from_dict(d))
 
